@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
+using System.Threading;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.iOS.Xcode;
@@ -38,7 +39,22 @@ namespace Apple.Core
         } 
     }
 
+    /// <summary>
+    /// ApplePlugInEnvironmentInitializer will initialize ApplePlugInEnvironment after all assets have been loaded by the editor
+    /// to prevent race conditions when the ApplePlugInsEnvironment attempts to create or load assets.
+    /// </summary>
     [InitializeOnLoad]
+    public class ApplePlugInEnvironmentInitializer : AssetPostprocessor
+    {
+        static void OnPostprocessAllAssets(string[] importedAssets, string[] deletedAssets, string[] movedAssets, string[] movedFromAssetPaths, bool didDomainReload)
+        {
+            if (didDomainReload) 
+            {
+                ApplePlugInEnvironment.CheckApplePlugInEnvironment();
+            }
+        }
+    }
+
     public static class ApplePlugInEnvironment
     {
         /// <summary>
@@ -131,8 +147,9 @@ namespace Apple.Core
         /// <summary>
         /// Static constructor used by Unity for initialization of the ApplePlugInEnvironment.
         /// </summary>
-        static ApplePlugInEnvironment()
+        public static void CheckApplePlugInEnvironment()
         {
+            Debug.Log("[Apple Unity Plug-ins] ApplePlugInEnvironment");
             // Ensure that the necessary Apple Unity Plug-In support folders exist and let user know if any have been created.
             string createFolderMessage = "[Apple Unity Plug-ins] Creating support folders:\n";
             bool foldersCreated = false;
@@ -170,13 +187,30 @@ namespace Apple.Core
             _appleUnityPackages = new Dictionary<string, AppleUnityPackage>();
             _packageManagerListRequest = Client.List();
 
-            // Initialize state tracking
-            _updateState = UpdateState.Initializing;
             _trackedAppleConfig = GetAppleBuildConfig();
             _trackedApplePlatform = GetApplePlatformID(EditorUserBuildSettings.activeBuildTarget);
-
-            EditorApplication.update += OnEditorUpdate;
+            _updateState = UpdateState.Initializing;
             Events.registeringPackages += OnPackageManagerRegistrationUpdate;
+
+            // If running headless in batch mode, this will never actually get a chance
+            // run an update before doing a build. So we need to force it in here.
+            if (Application.isBatchMode)
+            {
+                Debug.Log("[Apple Unity Plug-ins] Batch Mode Build. Waiting for registry.");
+                
+                while (_updateState != UpdateState.Updating)
+                {
+                    OnEditorUpdate();
+                    Thread.Sleep(100);
+                }
+
+                Debug.Log("[Apple Unity Plug-ins] Finished updating our registry");
+            }
+            else
+            {
+                // Initialize state tracking
+                EditorApplication.update += OnEditorUpdate;
+            }
         }
 
         /// <summary>
@@ -398,7 +432,8 @@ namespace Apple.Core
                 if (buildStep != null && buildStep.IsNativePlugIn && buildStep.DisplayName == unityPackage.displayName && unityPackage.author.name == AppleUnityPackageAuthorName && !_appleUnityPackages.ContainsKey(unityPackage.displayName))
                 {
                     AppleUnityPackage applePackage = new AppleUnityPackage(unityPackage.name, unityPackage.displayName, unityPackage.resolvedPath);
-                    if (!applePackage.PlayModeSupportLibrary.IsValid)
+                    string[] nativeLibraryRootPaths = Directory.GetDirectories(unityPackage.resolvedPath, AppleNativeLibraryUtility.SourceNativeLibraryFolderName, SearchOption.AllDirectories);
+                    if (nativeLibraryRootPaths.Length >= 1 && !applePackage.PlayModeSupportLibrary.IsValid)
                     {
                         string warningMessage = $"[Apple Unity Plug-ins] Unable to locate a macOS native library for {applePackage.DisplayName}\n"
                         + $"  Play mode support for {applePackage.DisplayName} in the Unity Editor won't function without this library.\n"
