@@ -8,6 +8,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace Apple.Core
 {
@@ -132,7 +133,7 @@ namespace Apple.Core
             {
                 LogDevelopmentMessage("OnPostProcessBuild", "OnProcessEntitlements begin");
 
-                var entitlementsPath = GetEntitlementsPath(buildTarget, generatedProjectPath);
+                var entitlementsPath = GetEntitlementsPath(buildTarget, generatedProjectPath, out var fileAlreadyExists);
                 var entitlements = new PlistDocument();
 
                 if (File.Exists(entitlementsPath))
@@ -172,9 +173,16 @@ namespace Apple.Core
 
                 if (pbxProject != null)
                 {
-                    var entitlementsXCodePath = buildTarget == BuildTarget.StandaloneOSX ? $"{Application.productName}/{Application.productName}.entitlements" : $"{Application.productName}.entitlements";
-                    var targetGuid = buildTarget == BuildTarget.StandaloneOSX ? pbxProject.TargetGuidByName(Application.productName) : pbxProject.GetUnityMainTargetGuid();
-                    pbxProject.AddBuildProperty(targetGuid, "CODE_SIGN_ENTITLEMENTS", entitlementsXCodePath);
+                    if (!fileAlreadyExists)
+                    {
+                        var entitlementsXCodePath = buildTarget == BuildTarget.StandaloneOSX
+                            ? $"{Application.productName}/{Application.productName}.entitlements"
+                            : $"{Application.productName}.entitlements";
+                        var targetGuid = buildTarget == BuildTarget.StandaloneOSX
+                            ? pbxProject.TargetGuidByName(Application.productName)
+                            : pbxProject.GetUnityMainTargetGuid();
+                        pbxProject.AddBuildProperty(targetGuid, "CODE_SIGN_ENTITLEMENTS", entitlementsPath);
+                    }
 
                     LogDevelopmentMessage("OnPostProcessBuild", $"Writing changes to PBXProject {pbxProjectPath}");
                     pbxProject.WriteToFile(pbxProjectPath);
@@ -289,26 +297,44 @@ namespace Apple.Core
         /// <summary>
         /// Returns the path to the entitlements for a given build target and project
         /// </summary>
-        public static string GetEntitlementsPath(BuildTarget buildTarget, string pathToBuiltProject)
+        public static string GetEntitlementsPath(BuildTarget buildTarget, string pathToBuiltProject, out bool fileAlreadyExists)
         {
-            if (buildTarget == BuildTarget.StandaloneOSX)
+            var entitlementsFiles = new DirectoryInfo(pathToBuiltProject).GetFiles("*.entitlements", SearchOption.AllDirectories);
+            if (entitlementsFiles.Length == 0)
             {
-                if (AppleNativeLibraryUtility.IsXcodeProjectGeneratedForMac)
+                fileAlreadyExists = false;
+                if (buildTarget == BuildTarget.StandaloneOSX)
                 {
+                    if (AppleNativeLibraryUtility.IsXcodeProjectGeneratedForMac)
+                    {
 #if UNITY_2020_1_OR_NEWER
-                    return $"{pathToBuiltProject}/{Application.productName}/{Application.productName}.entitlements";
+                        return $"{pathToBuiltProject}/{Application.productName}/{Application.productName}.entitlements";
 #else
-                    return $"{Path.GetDirectoryName(pathToBuiltProject)}/{Application.productName}/{Application.productName}.entitlements";
+                        return $"{Path.GetDirectoryName(pathToBuiltProject)}/{Application.productName}/{Application.productName}.entitlements";
 #endif
+                    }
+                    else
+                    {
+                        return $"{Path.GetDirectoryName(pathToBuiltProject)}/{Application.productName}.entitlements";
+                    }
                 }
                 else
                 {
-                    return $"{Path.GetDirectoryName(pathToBuiltProject)}/{Application.productName}.entitlements";
+                    return $"{pathToBuiltProject}/{Application.productName}.entitlements";
                 }
             }
             else
             {
-                return $"{pathToBuiltProject}/{Application.productName}.entitlements";
+                fileAlreadyExists = true;
+                var file = entitlementsFiles.FirstOrDefault(d => d.Name.ToLower().Contains("unity"));
+
+                if (file == null)
+                    file = entitlementsFiles.First();
+
+                if (entitlementsFiles.Length > 1)
+                    Debug.LogWarning("Attention, it seems that you have multiple entitlements file. Only one will be added the Project : " + file.Name);
+
+                return file.FullName;
             }
         }
 
